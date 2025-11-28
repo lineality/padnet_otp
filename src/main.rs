@@ -344,23 +344,23 @@ fn test_4_hash_validation(base_path: &Path) {
     }
 
     print_step("4A.2", "Verify hash files created");
-    let hash_000 = alice_page.join("padnest_0_000/pad_000/sha256_page_000");
-    let hash_001 = alice_page.join("padnest_0_000/pad_000/sha256_page_001");
+    let hash_000 = alice_page.join("padnest_0_000/pad_000/hash_page_000");
+    let hash_001 = alice_page.join("padnest_0_000/pad_000/hash_page_001");
 
     if hash_000.exists() {
         let content = fs::read_to_string(&hash_000).unwrap();
-        println!("  ✓ sha256_page_000 exists");
+        println!("  ✓ hash_page_000 exists");
         println!("    Hash: {}", content.trim());
     } else {
-        println!("  ✗ sha256_page_000 missing");
+        println!("  ✗ hash_page_000 missing");
     }
 
     if hash_001.exists() {
         let content = fs::read_to_string(&hash_001).unwrap();
-        println!("  ✓ sha256_page_001 exists");
+        println!("  ✓ hash_page_001 exists");
         println!("    Hash: {}", content.trim());
     } else {
-        println!("  ✗ sha256_page_001 missing");
+        println!("  ✗ hash_page_001 missing");
     }
 
     print_step("4A.3", "Copy to Bob (with hashes)");
@@ -418,13 +418,13 @@ fn test_4_hash_validation(base_path: &Path) {
     }
 
     print_step("4B.2", "Verify pad hash file");
-    let pad_hash = alice_pad.join("padnest_0_000/sha256_pad_000");
+    let pad_hash = alice_pad.join("padnest_0_000/hash_pad_000");
     if pad_hash.exists() {
         let content = fs::read_to_string(&pad_hash).unwrap();
-        println!("  ✓ sha256_pad_000 exists");
+        println!("  ✓ hash_pad_000 exists");
         println!("    Hash: {}", content.trim());
     } else {
-        println!("  ✗ sha256_pad_000 missing");
+        println!("  ✗ hash_pad_000 missing");
     }
 
     println!(

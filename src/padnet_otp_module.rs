@@ -18,7 +18,7 @@
 //! - 4-byte index: padnest_0/pad/page/line (256^4 lines, ~137GB-2TB)
 //! - 8-byte index: padnest_4/.../padnest_0/pad/page/line (256^8 lines, ~590EB-9.4ZB)
 //! - Line files: atomic units of N bytes of cryptographic entropy
-//! - Optional SHA-256 validation at pad or page directory level
+//! - Optional hash validation at pad or page directory level
 //!
 //! ## Safety Model
 //! - Writer mode: destructive, atomic, no-retry (lines deleted after load)
@@ -51,15 +51,15 @@ pub enum PadIndexMaxSize {
 }
 
 /// Integrity validation strategy for pad directories
-/// Determines if/when SHA-256 hashes are created during pad generation
+/// Determines if/when dir hashes are created during pad generation
 #[derive(Debug, Clone, Copy)]
 pub enum ValidationLevel {
     /// Hash entire pad directories (pad_XXX level)
-    /// Creates sha256_pad_XXX files as siblings to pad directories
+    /// Creates hash_pad_XXX files as siblings to pad directories
     PadLevel,
 
     /// Hash each page directory (page_XXX level)
-    /// Creates sha256_page_XXX files as siblings to page directories
+    /// Creates hash_page_XXX files as siblings to page directories
     PageLevel,
 
     /// No validation - trust filesystem integrity
@@ -77,7 +77,7 @@ pub enum PadnetError {
     /// Filesystem I/O operation failed
     IoError(String),
 
-    /// SHA-256 hash creation or validation failed
+    /// hash creation or validation failed
     HashOperationFailed(String),
 
     /// Input validation or assertion violation
@@ -198,72 +198,6 @@ fn read_entropy(bytes_needed: usize) -> Result<Vec<u8>, PadnetError> {
     Ok(buffer)
 }
 
-// this hashes file paths
-// /// Generate SHA-256 hash of directory contents using external command
-// ///
-// /// ## Project Context
-// /// Provides optional integrity validation for pad/page directories. Uses
-// /// external sha256sum command to maintain zero-dependency policy while
-// /// providing cryptographic validation of directory contents.
-// ///
-// /// ## Algorithm
-// /// Executes POSIX command:
-// /// ```bash
-// /// find dir -type f -exec sha256sum {} + | sort -k 2 | sha256sum
-// /// ```
-// /// This creates deterministic hash of all files in directory tree.
-// ///
-// /// # Arguments
-// /// * `dir_path` - Absolute path to directory to hash
-// ///
-// /// # Returns
-// /// * `Ok(String)` - Hex-encoded SHA-256 hash
-// /// * `Err(PadnetError)` - If command execution fails
-// /// Generate SHA-256 hash of directory contents using external command
-// ///
-// /// Executes: find dir -type f -exec sha256sum {} + | sort -k 2 | sha256sum
-// fn generate_directory_hash(dir_path: &Path) -> Result<String, PadnetError> {
-//     let dir_str = dir_path
-//         .to_str()
-//         .ok_or_else(|| PadnetError::HashOperationFailed("GDH: invalid path".into()))?;
-
-//     // Run complete pipeline as single shell command
-//     let output = Command::new("sh")
-//         .arg("-c")
-//         .arg(format!(
-//             "find '{}' -type f -exec sha256sum {{}} + | sort -k 2 | sha256sum",
-//             dir_str
-//         ))
-//         .output()
-//         .map_err(|e| {
-//             #[cfg(debug_assertions)]
-//             {
-//                 PadnetError::HashOperationFailed(format!("GDH: command failed: {}", e))
-//             }
-//             #[cfg(not(debug_assertions))]
-//             {
-//                 let _ = e;
-//                 PadnetError::HashOperationFailed("GDH: command failed".into())
-//             }
-//         })?;
-
-//     if !output.status.success() {
-//         return Err(PadnetError::HashOperationFailed(
-//             "GDH: non-zero exit".into(),
-//         ));
-//     }
-
-//     // Extract hash (first 64 hex characters before whitespace)
-//     let output_str = String::from_utf8_lossy(&output.stdout);
-//     let hash = output_str
-//         .split_whitespace()
-//         .next()
-//         .ok_or_else(|| PadnetError::HashOperationFailed("GDH: no hash in output".into()))?
-//         .to_string();
-
-//     Ok(hash)
-// }
-
 /// Generate Pearson hash of directory contents
 ///
 /// ## Project Context
@@ -308,7 +242,7 @@ fn generate_directory_hash(dir_path: &Path) -> Result<String, PadnetError> {
 /// - Uses /dev/urandom for all entropy (POSIX only, fails clean on non-POSIX)
 /// - Creates complete directory hierarchy based on index size
 /// - Fills all line files with cryptographic random bytes
-/// - Optionally creates SHA-256 validation hashes
+/// - Optionally creates validation hashes
 /// - All-or-nothing operation: partial creation leaves no artifacts
 ///
 /// ## Directory Structure (4-byte example)
@@ -320,9 +254,9 @@ fn generate_directory_hash(dir_path: &Path) -> Result<String, PadnetError> {
 /// │   │   │   ├── line_000
 /// │   │   │   ├── line_001
 /// │   │   │   └── ...
-/// │   │   ├── sha256_page_000  (if PageLevel validation)
+/// │   │   ├── hash_page_000  (if PageLevel validation)
 /// │   │   └── ...
-/// │   ├── sha256_pad_000  (if PadLevel validation)
+/// │   ├── hash_pad_000  (if PadLevel validation)
 /// │   └── ...
 /// ```
 ///
@@ -330,7 +264,7 @@ fn generate_directory_hash(dir_path: &Path) -> Result<String, PadnetError> {
 /// * `padset_root` - Absolute path where padset will be created
 /// * `max_pad_index_size` - Index space size (4-byte or 8-byte)
 /// * `number_of_bytes_per_line` - How many random bytes per line file (16-4096)
-/// * `validation_level` - Whether to create SHA-256 hash files
+/// * `validation_level` - Whether to create hash files
 ///
 /// # Returns
 /// * `Ok(())` - Padset created successfully
@@ -355,7 +289,7 @@ fn generate_directory_hash(dir_path: &Path) -> Result<String, PadnetError> {
 ///   - [1,2,3,4] = 2 nests, 3 pads, 4 pages, 5 lines
 ///   - Can be 4 or 8 bytes depending on desired hierarchy depth
 /// * `number_of_bytes_per_line` - How many random bytes per line file (16-4096)
-/// * `dir_checksum_files` - If true, create SHA-256 hashes at pad/page level
+/// * `dir_checksum_files` - If true, create hashes at pad/page level
 ///
 /// # Returns
 /// * `Ok(())` - Padset created successfully
@@ -510,7 +444,7 @@ fn create_4byte_padset_bounded(
                 // Create page-level hash if requested
                 if matches!(validation, ValidationLevel::PageLevel) {
                     let hash = generate_directory_hash(&page_path)?;
-                    let hash_file_path = pad_path.join(format!("sha256_page_{:03}", page));
+                    let hash_file_path = pad_path.join(format!("hash_page_{:03}", page));
                     let mut hash_file = File::create(&hash_file_path).map_err(|e| {
                         #[cfg(debug_assertions)]
                         {
@@ -542,7 +476,7 @@ fn create_4byte_padset_bounded(
             // Create pad-level hash if requested
             if matches!(validation, ValidationLevel::PadLevel) {
                 let hash = generate_directory_hash(&pad_path)?;
-                let hash_file_path = nest0_path.join(format!("sha256_pad_{:03}", pad));
+                let hash_file_path = nest0_path.join(format!("hash_pad_{:03}", pad));
                 let mut hash_file = File::create(&hash_file_path).map_err(|e| {
                     #[cfg(debug_assertions)]
                     {
@@ -736,7 +670,7 @@ fn create_8byte_padset_bounded(
                                 if matches!(validation, ValidationLevel::PageLevel) {
                                     let hash = generate_directory_hash(&page_path)?;
                                     let hash_file_path =
-                                        pad_path.join(format!("sha256_page_{:03}", page));
+                                        pad_path.join(format!("hash_page_{:03}", page));
                                     let mut hash_file =
                                         File::create(&hash_file_path).map_err(|e| {
                                             #[cfg(debug_assertions)]
@@ -777,7 +711,7 @@ fn create_8byte_padset_bounded(
                             if matches!(validation, ValidationLevel::PadLevel) {
                                 let hash = generate_directory_hash(&pad_path)?;
                                 let hash_file_path =
-                                    nest0_path.join(format!("sha256_pad_{:03}", pad));
+                                    nest0_path.join(format!("hash_pad_{:03}", pad));
                                 let mut hash_file = File::create(&hash_file_path).map_err(|e| {
                                     #[cfg(debug_assertions)]
                                     {
@@ -1278,7 +1212,7 @@ mod index_tests {
 ///
 /// # Arguments
 /// * `dir_path` - Directory to validate
-/// * `hash_file_path` - Path to hash file (e.g., sha256_page_000)
+/// * `hash_file_path` - Path to hash file (e.g., hash_page_000)
 ///
 /// # Returns
 /// * `Ok(())` - Validation passed or not required
@@ -1498,7 +1432,7 @@ pub fn read_padset_one_byteline(
     if let Some(page_dir) = line_path.parent() {
         if let Some(page_name) = page_dir.file_name() {
             if let Some(pad_dir) = page_dir.parent() {
-                let hash_file = pad_dir.join(format!("sha256_{}", page_name.to_string_lossy()));
+                let hash_file = pad_dir.join(format!("hash_{}", page_name.to_string_lossy()));
                 validate_and_remove_hash(page_dir, &hash_file)?;
             }
         }
@@ -1509,7 +1443,7 @@ pub fn read_padset_one_byteline(
         if let Some(pad_dir) = page_dir.parent() {
             if let Some(pad_name) = pad_dir.file_name() {
                 if let Some(nest_dir) = pad_dir.parent() {
-                    let hash_file = nest_dir.join(format!("sha256_{}", pad_name.to_string_lossy()));
+                    let hash_file = nest_dir.join(format!("hash_{}", pad_name.to_string_lossy()));
                     validate_and_remove_hash(pad_dir, &hash_file)?;
                 }
             }
@@ -1605,7 +1539,7 @@ pub fn padnet_load_delete_read_one_byteline(
     if let Some(page_dir) = line_path.parent() {
         if let Some(page_name) = page_dir.file_name() {
             if let Some(pad_dir) = page_dir.parent() {
-                let hash_file = pad_dir.join(format!("sha256_{}", page_name.to_string_lossy()));
+                let hash_file = pad_dir.join(format!("hash_{}", page_name.to_string_lossy()));
                 validate_and_remove_hash(page_dir, &hash_file)?;
             }
         }
@@ -1616,7 +1550,7 @@ pub fn padnet_load_delete_read_one_byteline(
         if let Some(pad_dir) = page_dir.parent() {
             if let Some(pad_name) = pad_dir.file_name() {
                 if let Some(nest_dir) = pad_dir.parent() {
-                    let hash_file = nest_dir.join(format!("sha256_{}", pad_name.to_string_lossy()));
+                    let hash_file = nest_dir.join(format!("hash_{}", pad_name.to_string_lossy()));
                     validate_and_remove_hash(pad_dir, &hash_file)?;
                 }
             }
