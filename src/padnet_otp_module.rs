@@ -2068,6 +2068,56 @@ pub fn padnet_reader_xor_file(
 /// # Returns
 /// * `Ok((PadIndex, usize))` - Starting index used and bytes processed
 /// * `Err(PadnetError)` - Operation failed, no output created
+/// XOR a file with padset (writer mode - destructive, strict, atomic)
+///
+/// ## Project Context
+/// Writer mode creates OTP-encrypted files for transmission. This is the
+/// "sender" operation. It automatically finds the first available line,
+/// consumes (deletes) pad lines as it proceeds, and returns the starting
+/// index so the receiver knows where to start decryption.
+///
+/// ## Output
+/// - Creates encrypted file at `result_path`
+/// - Returns starting pad index and byte count
+/// - Byte count = number of input bytes read = output bytes written
+///
+/// ## Operation
+/// 1. Find first available line in padset
+/// 2. Open target file (read)
+/// 3. Create temp output file
+/// 4. Load and delete line from pad
+/// 5. Read target byte-by-byte, XOR with pad bytes
+/// 6. When pad line exhausted, load and delete next line
+/// 7. Write XOR'd bytes to temp file ← ENCRYPTED DATA WRITTEN HERE
+/// 8. Move temp to final result location (atomic) ← OUTPUT FILE CREATED
+/// 9. Return starting index and byte count
+///
+/// ## Error Handling
+/// - On ANY error: delete temp file, return error
+/// - Lines already deleted stay deleted (cannot retry from same position)
+/// - Caller must restart from new first-available line
+///
+/// # Arguments
+/// * `path_to_target_file` - Absolute path to plaintext file to encrypt
+/// * `result_path` - Absolute path for encrypted output file (will be created)
+/// * `path_to_padset` - Absolute path to padset root
+///
+/// # Returns
+/// * `Ok((PadIndex, usize))` - Starting pad index used, and count of bytes encrypted
+/// * `Err(PadnetError)` - Operation failed, no output file created
+///
+/// # Example
+/// ```rust,no_run
+/// // Encrypt "message.txt" to "message.enc"
+/// let (start_idx, byte_count) = padnet_writer_strict_cleanup_continuous_xor_file(
+///     Path::new("/absolute/path/to/message.txt"),
+///     Path::new("/absolute/path/to/message.enc"),  // ← encrypted file created here
+///     Path::new("/absolute/path/to/padset"),
+/// )?;
+/// // start_idx: pad position to send to receiver
+/// // byte_count: how many bytes were encrypted (file size)
+/// ```
+/// Note: byte count is NOT used for ANYTHING functional
 pub fn padnet_writer_strict_cleanup_continuous_xor_file(
     path_to_target_file: &Path,
     result_path: &Path,
