@@ -29,7 +29,6 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Maximum allowed size for a padline file in bytes
 /// Prevents accidentally creating massive line files
@@ -753,27 +752,6 @@ fn create_8byte_padset_bounded(
     Ok(())
 }
 
-/// Create 8-byte index padset structure
-/// Structure: padnest_4/padnest_3/padnest_2/padnest_1/padnest_0/pad/page/line
-fn create_8byte_padset(
-    root: &Path,
-    bytes_per_line: usize,
-    validation: ValidationLevel,
-) -> Result<(), PadnetError> {
-    // Note: 8-byte creates 256^8 entries - astronomically large
-    // This is a placeholder for the structure
-    // In practice, partial creation up to needed size would be implemented
-
-    // For MVP: implement recursively or with careful nesting
-    // This would mirror the 4-byte structure but with 4 additional nest levels
-
-    // Placeholder implementation
-    let _ = (root, bytes_per_line, validation);
-    Err(PadnetError::AssertionViolation(
-        "C8BP: 8-byte padset not yet implemented".into(),
-    ))
-}
-
 // ============================================================================
 // TESTS
 // ============================================================================
@@ -781,7 +759,6 @@ fn create_8byte_padset(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn test_read_entropy_success() {
@@ -858,54 +835,59 @@ impl PadIndex {
     /// ## Behavior
     /// - Increments rightmost byte (line level)
     /// - Carries overflow to left (toward root)
-    /// - Returns None if all positions are 255 (pad exhausted)
+    /// - Returns None if overflow would occur (index stays at max)
     ///
     /// ## Examples
-    /// [0,0,0,254] → [0,0,0,255] → [0,0,1,0] → ... → [255,255,255,255] → None
+    /// [0,0,0,254] → [0,0,0,255] → [0,0,1,0] → ... → [255,255,255,255] → None (no change)
     ///
     /// # Returns
     /// - Some(()) if increment succeeded
-    /// - None if overflow (index was at maximum)
+    /// - None if overflow would occur (index unchanged at maximum)
     pub fn increment(&mut self) -> Option<()> {
         match self {
             PadIndex::Standard(arr) => {
-                // Changed from: ref mut arr
+                // Check if we're already at max BEFORE mutating
+                if arr.iter().all(|&b| b == 255) {
+                    return None; // Already at max, cannot increment
+                }
+
                 // Start from rightmost (leaf/line level)
                 for i in (0..4).rev() {
                     if arr[i] == 255 {
                         // Overflow at this position, carry to next
                         arr[i] = 0;
-                        // Continue to next position (if exists)
-                        if i == 0 {
-                            // Overflowed at root level - pad exhausted
-                            return None;
-                        }
+                        // Continue to carry (we know we're not at max from check above)
                     } else {
                         // Can increment this position
                         arr[i] += 1;
                         return Some(());
                     }
                 }
+
+                // Should never reach here due to initial check
+                // But include for exhaustiveness
                 None
             }
             PadIndex::Extended(arr) => {
-                // Changed from: ref mut arr
+                // Check if we're already at max BEFORE mutating
+                if arr.iter().all(|&b| b == 255) {
+                    return None; // Already at max, cannot increment
+                }
+
                 // Start from rightmost (leaf/line level)
                 for i in (0..8).rev() {
                     if arr[i] == 255 {
                         // Overflow at this position, carry to next
                         arr[i] = 0;
-                        // Continue to next position (if exists)
-                        if i == 0 {
-                            // Overflowed at root level - pad exhausted
-                            return None;
-                        }
+                        // Continue to carry
                     } else {
                         // Can increment this position
                         arr[i] += 1;
                         return Some(());
                     }
                 }
+
+                // Should never reach here due to initial check
                 None
             }
         }
@@ -1056,12 +1038,317 @@ fn find_first_available_line_4byte(root: &Path) -> Result<Option<PadIndex>, Padn
     Ok(Some(PadIndex::Standard([nest0, pad, page, line])))
 }
 
-/// Find first available line for 8-byte index (placeholder)
+/// Find first available line for 8-byte index padset
+///
+/// ## Project Context
+/// Writer mode needs to automatically find the "top" (first undeleted) line file
+/// in the padset to use next. As lines are consumed and deleted during OTP
+/// encryption operations, the first available line progressively moves forward
+/// through the 8-dimensional index space.
+///
+/// The 8-byte index provides massive scale (256^8 = ~18 quintillion lines),
+/// allowing for exabyte-scale pad storage. This function efficiently scans the
+/// hierarchical filesystem to find where we left off, without needing metadata
+/// files or databases.
+///
+/// ## 8-Byte Index Structure
+/// The 8-byte index maps to 8 nested directory levels:
+/// ```text
+/// [nest4, nest3, nest2, nest1, nest0, pad, page, line]
+///   ↓      ↓      ↓      ↓      ↓     ↓    ↓     ↓
+/// padnest_4_NNN/padnest_3_NNN/.../padnest_0_NNN/pad_NNN/page_NNN/line_NNN
+/// ```
+///
+/// ## Algorithm
+/// Descends through 8 directory levels, at each level:
+/// 1. Scan for entries matching level prefix (e.g., "padnest_4_", "pad_", etc.)
+/// 2. Sort entries numerically ascending (000 → 001 → ... → 255)
+/// 3. Take first existing entry (lowest numbered)
+/// 4. If no entries exist at this level → entire padset empty, return None
+/// 5. Descend into that directory and repeat for next level
+/// 6. Build up index array [nest4, nest3, nest2, nest1, nest0, pad, page, line]
+///
+/// ## Progression Example
+/// After deleting lines 000-253 from page_000, pad_000, ..., nest4_000:
+/// ```text
+/// Scan padnest_4_000 → finds padnest_3_000
+/// Scan padnest_3_000 → finds padnest_2_000
+/// Scan padnest_2_000 → finds padnest_1_000
+/// Scan padnest_1_000 → finds padnest_0_000
+/// Scan padnest_0_000 → finds pad_000
+/// Scan pad_000 → finds page_000
+/// Scan page_000 → finds line_254
+/// Returns: [0, 0, 0, 0, 0, 0, 0, 254]
+/// ```
+///
+/// After deleting all lines from page_000, the scan would find page_001 instead.
+///
+/// ## Memory Efficiency
+/// Despite the massive scale:
+/// - Only stores paths for current descent (8 PathBuf instances max)
+/// - Scans one directory at a time (bounded by 256 entries per directory)
+/// - Returns single [u8; 8] index
+/// - No accumulation of filesystem metadata
+/// - Constant memory usage regardless of padset size
+///
+/// ## Security Properties
+/// - No metadata exposure: only returns index of first available line
+/// - Production errors reveal no filesystem details
+/// - Deterministic: same filesystem state always returns same result
+/// - Atomic: either finds valid line or returns None (no partial state)
+///
+/// ## Failure Modes
+/// - Empty padset (all lines deleted): Returns Ok(None)
+/// - Filesystem read error at any level: Returns Err
+/// - Permission denied: Returns Err
+/// - Corrupted structure (missing intermediate directories): Returns Ok(None)
+///
+/// # Arguments
+/// * `root` - Absolute path to padset root directory
+///
+/// # Returns
+/// * `Ok(Some(PadIndex::Extended([u8; 8])))` - Found first available line
+/// * `Ok(None)` - Padset is completely empty (all lines consumed)
+/// * `Err(PadnetError)` - Filesystem error during scan (cannot determine state)
+///
+/// # Example
+/// ```rust,no_run
+/// use std::path::Path;
+///
+/// let padset = Path::new("/absolute/path/to/padset");
+/// match find_first_available_line_8byte(padset) {
+///     Ok(Some(idx)) => {
+///         println!("Next line to use: {:?}", idx);
+///         // Proceed with writer operation starting at this index
+///     }
+///     Ok(None) => {
+///         println!("Padset exhausted - no lines remaining");
+///         // Cannot proceed, need new padset
+///     }
+///     Err(e) => {
+///         eprintln!("Error scanning padset: {}", e);
+///         // Handle error (retry, abort, etc.)
+///     }
+/// }
+/// ```
+///
+/// # Production Safety
+/// - No panic on any error condition
+/// - Terse production errors (function ID: "FFAL8")
+/// - Debug builds include diagnostic details
+/// - Validates absolute path before beginning
+/// - Handles missing directories gracefully (returns None, not error)
 fn find_first_available_line_8byte(root: &Path) -> Result<Option<PadIndex>, PadnetError> {
-    let _ = root;
-    Err(PadnetError::AssertionViolation(
-        "FFAL8: 8-byte index not yet implemented".into(),
-    ))
+    // ========================================
+    // INPUT VALIDATION
+    // ========================================
+
+    // Debug assertion: root path should be absolute
+    #[cfg(all(debug_assertions, not(test)))]
+    debug_assert!(root.is_absolute(), "Padset root path must be absolute");
+
+    // Production catch: validate path is absolute
+    if !root.is_absolute() {
+        return Err(PadnetError::AssertionViolation(
+            "FFAL8: path must be absolute".into(),
+        ));
+    }
+
+    // ========================================
+    // LEVEL 0: padnest_4 (Most Significant)
+    // ========================================
+
+    // Scan root directory for padnest_4_XXX entries
+    // These are numbered 000-255, we want the first (lowest) that exists
+    let nest4_entries = scan_directory_ascending(root, "padnest_4_")?;
+
+    // If no padnest_4 directories exist, padset is empty
+    let nest4 = match nest4_entries.first() {
+        Some(n) => *n,
+        None => return Ok(None), // Empty padset
+    };
+
+    // Build path to first available padnest_4 directory
+    let nest4_path = root.join(format!("padnest_4_{:03}", nest4));
+
+    // ========================================
+    // LEVEL 1: padnest_3
+    // ========================================
+
+    // Scan padnest_4_XXX directory for padnest_3_YYY entries
+    let nest3_entries = scan_directory_ascending(&nest4_path, "padnest_3_")?;
+
+    // If no padnest_3 directories exist in this padnest_4, something is wrong
+    // (padnest_4 should have been deleted when empty)
+    let nest3 = match nest3_entries.first() {
+        Some(n) => *n,
+        None => return Ok(None), // Corrupted or empty branch
+    };
+
+    // Build path to first available padnest_3 directory
+    let nest3_path = nest4_path.join(format!("padnest_3_{:03}", nest3));
+
+    // ========================================
+    // LEVEL 2: padnest_2
+    // ========================================
+
+    // Scan padnest_3_XXX directory for padnest_2_YYY entries
+    let nest2_entries = scan_directory_ascending(&nest3_path, "padnest_2_")?;
+
+    let nest2 = match nest2_entries.first() {
+        Some(n) => *n,
+        None => return Ok(None), // Empty branch
+    };
+
+    // Build path to first available padnest_2 directory
+    let nest2_path = nest3_path.join(format!("padnest_2_{:03}", nest2));
+
+    // ========================================
+    // LEVEL 3: padnest_1
+    // ========================================
+
+    // Scan padnest_2_XXX directory for padnest_1_YYY entries
+    let nest1_entries = scan_directory_ascending(&nest2_path, "padnest_1_")?;
+
+    let nest1 = match nest1_entries.first() {
+        Some(n) => *n,
+        None => return Ok(None), // Empty branch
+    };
+
+    // Build path to first available padnest_1 directory
+    let nest1_path = nest2_path.join(format!("padnest_1_{:03}", nest1));
+
+    // ========================================
+    // LEVEL 4: padnest_0 (Innermost Nest)
+    // ========================================
+
+    // Scan padnest_1_XXX directory for padnest_0_YYY entries
+    let nest0_entries = scan_directory_ascending(&nest1_path, "padnest_0_")?;
+
+    let nest0 = match nest0_entries.first() {
+        Some(n) => *n,
+        None => return Ok(None), // Empty branch
+    };
+
+    // Build path to first available padnest_0 directory
+    let nest0_path = nest1_path.join(format!("padnest_0_{:03}", nest0));
+
+    // ========================================
+    // LEVEL 5: pad (Data Container Level)
+    // ========================================
+
+    // Scan padnest_0_XXX directory for pad_YYY entries
+    // This is where we transition from nest structure to data structure
+    let pad_entries = scan_directory_ascending(&nest0_path, "pad_")?;
+
+    let pad = match pad_entries.first() {
+        Some(p) => *p,
+        None => return Ok(None), // No pad directories exist
+    };
+
+    // Build path to first available pad directory
+    let pad_path = nest0_path.join(format!("pad_{:03}", pad));
+
+    // ========================================
+    // LEVEL 6: page (Intermediate Data Level)
+    // ========================================
+
+    // Scan pad_XXX directory for page_YYY entries
+    let page_entries = scan_directory_ascending(&pad_path, "page_")?;
+
+    let page = match page_entries.first() {
+        Some(p) => *p,
+        None => return Ok(None), // No page directories exist
+    };
+
+    // Build path to first available page directory
+    let page_path = pad_path.join(format!("page_{:03}", page));
+
+    // ========================================
+    // LEVEL 7: line (Leaf Level - Actual Data Files)
+    // ========================================
+
+    // Scan page_XXX directory for line_YYY files
+    // These are the actual pad data files that get consumed
+    let line_entries = scan_directory_ascending(&page_path, "line_")?;
+
+    let line = match line_entries.first() {
+        Some(l) => *l,
+        None => return Ok(None), // No line files exist
+    };
+
+    // ========================================
+    // BUILD AND RETURN 8-BYTE INDEX
+    // ========================================
+
+    // Construct the complete 8-byte index from the values we found
+    // Index format: [nest4, nest3, nest2, nest1, nest0, pad, page, line]
+    // This represents: padnest_4_NNN/.../padnest_0_NNN/pad_NNN/page_NNN/line_NNN
+    let index = PadIndex::Extended([
+        nest4, // Level 0: Root nest
+        nest3, // Level 1: Sub-nest
+        nest2, // Level 2: Sub-nest
+        nest1, // Level 3: Sub-nest
+        nest0, // Level 4: Innermost nest
+        pad,   // Level 5: Pad container
+        page,  // Level 6: Page container
+        line,  // Level 7: Line file (leaf)
+    ]);
+
+    // Debug logging in debug builds only
+    #[cfg(debug_assertions)]
+    {
+        eprintln!("FFAL8: Found first available line: {:?}", index);
+        eprintln!("  Path: {}", index.to_path(root).display());
+    }
+
+    Ok(Some(index))
+}
+
+#[cfg(test)]
+mod extended_index_tests {
+    use super::*;
+
+    #[test]
+    fn test_find_first_available_line_8byte_empty() {
+        let temp_dir = std::env::temp_dir().join("test_8byte_empty");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir(&temp_dir).unwrap();
+
+        let result = find_first_available_line_8byte(&temp_dir);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none()); // Empty padset
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn test_find_first_available_line_8byte_with_data() {
+        let temp_dir = std::env::temp_dir().join("test_8byte_data");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        // Create minimal 8-byte structure with one line
+        let line_path = temp_dir
+            .join("padnest_4_000")
+            .join("padnest_3_000")
+            .join("padnest_2_000")
+            .join("padnest_1_000")
+            .join("padnest_0_000")
+            .join("pad_000")
+            .join("page_000")
+            .join("line_000");
+
+        fs::create_dir_all(line_path.parent().unwrap()).unwrap();
+        fs::write(&line_path, b"test data").unwrap();
+
+        let result = find_first_available_line_8byte(&temp_dir);
+        assert!(result.is_ok());
+
+        let index = result.unwrap().unwrap();
+        assert_eq!(index, PadIndex::Extended([0, 0, 0, 0, 0, 0, 0, 0]));
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
 }
 
 /// Scan directory for entries with given prefix, return sorted numeric values
@@ -1161,11 +1448,23 @@ mod index_tests {
     }
 
     #[test]
+    fn test_index_increment_stays_at_max() {
+        let mut idx = PadIndex::new_standard([255, 255, 255, 255]);
+
+        // Multiple attempts should all return None and preserve max
+        assert_eq!(idx.increment(), None);
+        assert_eq!(idx, PadIndex::Standard([255, 255, 255, 255]));
+
+        assert_eq!(idx.increment(), None);
+        assert_eq!(idx, PadIndex::Standard([255, 255, 255, 255]));
+    }
+
+    #[test]
     fn test_index_increment_overflow() {
         let mut idx = PadIndex::new_standard([255, 255, 255, 255]);
         assert_eq!(idx.increment(), None);
-        // Index should stay at max after overflow attempt
-        assert_eq!(idx, PadIndex::Standard([0, 0, 0, 0])); // Actually wraps to zero
+        // ✅ Index preserved at max after overflow attempt
+        assert_eq!(idx, PadIndex::Standard([255, 255, 255, 255]));
     }
 
     #[test]
@@ -1947,9 +2246,22 @@ fn perform_xor_operation(
     // Read target file one byte at a time
     let mut target_buffer = [0u8; 1];
 
+    // max for loop
+    const MAX_XOR_ITERATIONS: usize = usize::MAX; // Or reasonable limit
+    let mut iteration_count = 0;
+
     loop {
+        iteration_count += 1;
+        if iteration_count > MAX_XOR_ITERATIONS {
+            return Err(PadnetError::IoError("PXO: iteration limit exceeded".into()));
+        }
         // Check if we need to load next pad line
         if pad_line_position >= pad_line_buffer.len() {
+            // Check if we're at max BEFORE incrementing
+            if current_index.is_max() {
+                return Err(PadnetError::IoError("PXO: pad exhausted".into()));
+            }
+
             // Current line exhausted, load next
             current_index
                 .increment()
@@ -2026,7 +2338,7 @@ fn perform_xor_operation(
 
 #[cfg(test)]
 mod xor_tests {
-    use super::*;
+    // use super::*;
 
     #[test]
     fn test_xor_idempotent() {
@@ -2425,61 +2737,6 @@ pub fn calculate_flat_dir_directory_pearson_hash(
 // RECURSIVE DIRECTORY HASHING
 // ============================================================================
 
-/// Helper function for recursive file collection
-///
-/// Walks directory tree depth-first, collecting all regular file paths.
-/// Ignores directories, symlinks, and special files.
-///
-/// # Arguments
-/// * `dir_path` - Directory to search
-/// * `files` - Accumulator vector to collect file paths
-///
-/// # Returns
-/// * `Ok(())` - Successfully collected files
-/// * `Err(DirectoryHashError)` - Cannot read directory
-fn collect_files_helper(
-    dir_path: &Path,
-    files: &mut Vec<PathBuf>,
-) -> Result<(), DirectoryHashError> {
-    // Read entries in this directory
-    let entries = fs::read_dir(dir_path).map_err(|_| {
-        DirectoryHashError::DirectoryAccess("CFH: cannot read directory".to_string())
-    })?;
-
-    // Process each entry
-    for entry_result in entries {
-        match entry_result {
-            Ok(entry) => {
-                let path = entry.path();
-
-                // Get metadata to determine file type
-                match entry.metadata() {
-                    Ok(metadata) => {
-                        if metadata.is_file() {
-                            // Regular file - add to collection
-                            files.push(path);
-                        } else if metadata.is_dir() {
-                            // Subdirectory - recurse into it
-                            collect_files_helper(&path, files)?;
-                        }
-                        // Ignore symlinks and special files
-                    }
-                    Err(_) => {
-                        // Skip entries we can't read metadata for
-                        continue;
-                    }
-                }
-            }
-            Err(_) => {
-                // Skip entries we can't read
-                continue;
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Recursively collect all regular file paths in a directory tree
 ///
 /// # Project Context
@@ -2511,14 +2768,45 @@ fn collect_files_helper(
 /// Returns: `[pad_000/page_000/line_000, pad_000/page_000/line_001, pad_000/page_001/line_000]`
 fn collect_all_files_recursive(dir_path: &Path) -> Result<Vec<PathBuf>, DirectoryHashError> {
     let mut files = Vec::new();
+    let mut dirs_to_process = vec![dir_path.to_path_buf()];
 
-    // Recursively collect all files
-    collect_files_helper(dir_path, &mut files)?;
+    // Failsafe: max depth
+    let mut iterations = 0;
+    const MAX_ITERATIONS: usize = 10000;
 
-    // Sort by full path for deterministic ordering
-    // This ensures same directory contents always produce same hash
+    while let Some(current_dir) = dirs_to_process.pop() {
+        iterations += 1;
+        if iterations > MAX_ITERATIONS {
+            return Err(DirectoryHashError::InvalidInput(
+                "CAFR: max depth exceeded".into(),
+            ));
+        }
+
+        let entries = fs::read_dir(&current_dir).map_err(|_| {
+            DirectoryHashError::DirectoryAccess("CAFR: cannot read directory".to_string())
+        })?;
+
+        for entry_result in entries {
+            match entry_result {
+                Ok(entry) => {
+                    let path = entry.path();
+                    match entry.metadata() {
+                        Ok(metadata) => {
+                            if metadata.is_file() {
+                                files.push(path);
+                            } else if metadata.is_dir() {
+                                dirs_to_process.push(path);
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
     files.sort();
-
     Ok(files)
 }
 
