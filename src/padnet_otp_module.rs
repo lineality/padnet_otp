@@ -2137,9 +2137,7 @@ mod line_loading_tests {
     // }
 }
 
-// Add after the line loading functions
-
-/// XOR a file with padset (reader mode - syncs pad then processes)
+/// reader - XOR a file with padset (reader mode - syncs pad then processes)
 ///
 /// ## Project Context
 /// Reader mode (receiver/Bob) processes OTP-encrypted files received from
@@ -2147,13 +2145,13 @@ mod line_loading_tests {
 /// and must sync their pristine padset to match the sender's consumed state
 /// before decryption.
 ///
-/// ## 3-Step Operation
+/// ## 4-Step Operation
 /// 1. **Sync**: Delete all pad lines before start_index (not inclusive)
 ///    - This makes receiver's "first available" match sender's starting point
 /// 2. **Preflight Check**: check before XOR, correct line?
 /// 3. **XOR**: Process file using same function as writer
 ///    - Destructive: lines deleted as consumed (OTP one-time property)
-/// 4. Sync Verification: make sure correct line was read started-at
+/// 4. **Sync Verification**: make sure correct line was read started-at
 ///
 /// ## Error Handling
 /// - On any error: operation fails cleanly, temp files cleaned up
