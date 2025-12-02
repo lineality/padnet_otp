@@ -1,10 +1,80 @@
 #### padnet_otp
+- 2025.11.20,27; 2025.12.01,02
 
 # Padnet (OTP-Network 'Layer') 
 
 This is to be a single flatfile crate, padnet_opt_module.rs file.
 
-2025.11.20,27:
+At a high level, both team-members must be able to follow the same systematic process to find the next 'line' of bytes to read, such that a 'document' can seamlessly use multiple pages/sets of lines.
+
+```
+LOOP:
+    process bytes from current line
+    
+    when line exhausted:
+        increment current_index  // [0,0,0,5] → [0,0,0,6]
+        
+        if file_exists(current_index):
+            load that line
+            continue LOOP
+        else:
+            // Boundary crossed or gap in files
+            current_index = find_first_available_line(padset)
+            
+            if current_index is None:
+                DONE - padset exhausted
+            else:
+                load line at new current_index
+                continue LOOP
+
+```
+
+Change from original plan: Strict One Time Rule
+
+the start-here signal array is still sent, but it is used to first delete everything before (not inclusive) the values in the array. 
+
+clean_until_start_line_not_inclusive([0, 2, 5, 10])
+
+start index == [0, 2, 5, 10]:
+```
+Root
+├── padnest_0_000/          ← Keep (index[0] = 0, nothing before it)
+│   ├── pad_000/            ← DELETE (< 2)
+│   ├── pad_001/            ← DELETE (< 2)
+│   ├── pad_002/            ← Keep (target), but clean inside...
+│   │   ├── page_000/       ← DELETE (< 5)
+│   │   ├── page_001/       ← DELETE (< 5)
+│   │   ├── page_002/       ← DELETE (< 5)
+│   │   ├── page_003/       ← DELETE (< 5)
+│   │   ├── page_004/       ← DELETE (< 5)
+│   │   ├── page_005/       ← Keep (target), but clean inside...
+│   │   │   ├── line_000    ← DELETE (< 10)
+│   │   │   ├── line_001    ← DELETE (< 10)
+│   │   │   ├── ...         ← DELETE
+│   │   │   ├── line_009    ← DELETE (< 10)
+│   │   │   ├── line_010    ← KEEP (this is start_index - NOT INCLUSIVE)
+│   │   │   └── line_011    ← KEEP
+
+```
+After that the reader and writer strict-one-time read lines and delete them.
+
+/// reader - XOR a file with padset (reader mode - syncs pad then processes)
+///
+/// ## Project Context
+/// Reader mode (receiver/Bob) processes OTP-encrypted files received from
+/// sender (Alice). The receiver has the starting pad index from the sender
+/// and must sync their pristine padset to match the sender's consumed state
+/// before decryption.
+///
+/// ## 4-Step Operation
+/// 1. **Sync**: Delete all pad lines before start_index (not inclusive)
+///    - This makes receiver's "first available" match sender's starting point
+/// 2. **Preflight Check**: check before XOR, correct line?
+/// 3. **XOR**: Process file using same function as writer
+///    - Destructive: lines deleted as consumed (OTP one-time property)
+/// 4. **Sync Verification**: make sure correct line was read started-at
+
+
 
 pad_index_array = 4 bytes 2^32 == 4_294_967_296
 or 8-bytes = (2^64) 
@@ -85,19 +155,25 @@ depending on max_pad_index_array
 - None
 (see details below)
 
-2. read_padset_one_byteline(
-path_to_padset, 
-pad_index_array, 
-) -> result<bytes>
+2. /// # Arguments
+/// * `path_to_padset` - Absolute path to padset root
+/// * `pad_index` - Index specifying which line to load and delete
+///
+/// # Returns
+/// * `Ok(Vec<u8>)` - Line file contents (file now deleted)
+/// * `Err(PadnetError)` - File not found, validation failed, or operation error
+pub fn padnet_load_delete_read_one_byteline(
+    path_to_padset: &Path,
+    pad_index: &PadIndex,
+) -> Result<Vec<u8>, PadnetError> {
 
-- This may be (if ever) used for recipient reading, where they may need to re-process a XOR file for whatever reason.
-- before loading a new page/pad check for a hash
+Note: In version-2 design: recipient-reader deletes read-lines just as the writer does. 
 
 3. padnet_load_delete_read_one_byteline(
 path_to_padset, 
 pad_index_array, 
 ) -> result<bytes>
-- This is either always used period, or always used to for first XOR of a file. An OPT XOR'd file must (strictly) use fresh (never before used bytes). Presumably, the second 'read' pass by the recipient is not as strict. E.g. if a sender needs to re-try then they naturally start again beginning with a fresh (not used before line). But the recipient will lose the ability to try-again read if they destroy their pad.
+- This is either always used period, or always used to for first XOR of a file. An OPT XOR'd file must (strictly) use fresh (never before used bytes).
 
 4. padnet_reader_xor_file(
 path_to_target_file, 
@@ -370,6 +446,11 @@ The filesystem state is the filesystem state:
 There can be a reasonable max-size to the "line" length or line-file size. A line size should not be more than 5kb, or 4096. The exact too big number is not critical. when loading "line" file, if file size is above MAX_PADNET_PADLINE_FILE_SIZE_BYTES then error-exit.
 
 
+# OTP Signal
+There is another somewhat arbitrary choice about where to put the signal to use OTP or not (where it is not always-used or always not used). 
+E.g. team-channel level, remote-collaborator-pair, addressbook level, or file level.
+
+The file-level may be the simplest and the most robust, as it is a single-source of truth: Is this file to be OPT-XOR'd or not? It is useful for there not to be a reified floating fickle truth-fairy outside of that file itself. 
 
 
 
@@ -571,5 +652,3 @@ Production output following an error / exception / case must be managed and defi
 - expanding state destroys projects with unmaintainable over-reach
 
 Vigilance: We should help support users and developers and the people who depend upon maintainable software. Maintainable code supports the future for us all.
-
-

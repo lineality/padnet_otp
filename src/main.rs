@@ -3,7 +3,7 @@ mod padnet_otp_module;
 use padnet_otp_module::{
     PadIndex, PadIndexMaxSize, ValidationLevel, find_first_available_line,
     padnet_load_delete_read_one_byteline, padnet_make_one_pad_set, padnet_reader_xor_file,
-    padnet_writer_strict_cleanup_continuous_xor_file, read_padset_one_byteline,
+    padnet_writer_strict_cleanup_continuous_xor_file,
 };
 use std::env;
 use std::fs;
@@ -111,7 +111,7 @@ fn test_2_line_loading(base_path: &Path) {
 
     print_step("2.2", "Non-destructive read (reader mode)");
     let index_0 = PadIndex::new_standard([0, 0, 0, 0]);
-    match read_padset_one_byteline(&padset_path, &index_0) {
+    match padnet_load_delete_read_one_byteline(&padset_path, &index_0) {
         Ok(bytes) => {
             println!("  ✓ Read {} bytes from line_000", bytes.len());
             println!(
@@ -130,7 +130,7 @@ fn test_2_line_loading(base_path: &Path) {
     }
 
     print_step("2.3", "Read same line again (should work)");
-    match read_padset_one_byteline(&padset_path, &index_0) {
+    match padnet_load_delete_read_one_byteline(&padset_path, &index_0) {
         Ok(bytes) => println!("  ✓ Read {} bytes again (file preserved)", bytes.len()),
         Err(e) => println!("  ✗ Failed: {}", e),
     }
@@ -152,7 +152,7 @@ fn test_2_line_loading(base_path: &Path) {
     }
 
     print_step("2.5", "Try to read deleted line (should fail)");
-    match read_padset_one_byteline(&padset_path, &index_1) {
+    match padnet_load_delete_read_one_byteline(&padset_path, &index_1) {
         Ok(_) => println!("  ✗ Unexpectedly succeeded"),
         Err(e) => println!("  ✓ Correctly failed: {}", e),
     }
@@ -262,7 +262,7 @@ fn test_3_alice_bob_cycle(base_path: &Path) {
     let bytes_decrypted =
         match padnet_reader_xor_file(&encrypted, &decrypted, &bob_padset, &start_index) {
             Ok(bytes) => {
-                println!("  ✓ Decrypted {} bytes", bytes);
+                println!("  ✓ Decrypted {:?} bytes", bytes);
                 bytes
             }
             Err(e) => {
@@ -278,7 +278,7 @@ fn test_3_alice_bob_cycle(base_path: &Path) {
                 println!("  ✓✓✓ SUCCESS! Bob's message matches Alice's original! ✓✓✓");
                 println!("  Original:  {} bytes", message.len());
                 println!("  Encrypted: {} bytes", bytes_encrypted);
-                println!("  Decrypted: {} bytes", bytes_decrypted);
+                println!("  Decrypted: {:?} bytes", bytes_decrypted);
             } else {
                 println!("  ✗ FAILURE! Content mismatch");
             }
@@ -286,14 +286,97 @@ fn test_3_alice_bob_cycle(base_path: &Path) {
         Err(e) => println!("  ✗ Read failed: {}", e),
     }
 
-    print_step("3.9", "Test Bob's re-read capability");
+    // print_step("3.9", "Test Bob's re-read capability");
+    // let decrypted2 = base_path.join("test3_decrypted2.txt");
+    // match padnet_reader_xor_file(&encrypted, &decrypted2, &bob_padset, &start_index) {
+    //     Ok(bytes) => println!(
+    //         "  ✓ Re-decrypted {:?} bytes (reader mode preserved pad)",
+    //         bytes
+    //     ),
+    //     Err(e) => println!("  ✗ Re-decrypt failed: {}", e),
+    // }
+
+    // println!(
+    //     "\n  Compare: diff {} {}",
+    //     plaintext.display(),
+    //     decrypted.display()
+    // );
+    // println!(
+    //     "  Alice's pad: ls {}/padnest_0_000/pad_000/page_000/",
+    //     alice_padset.display()
+    // );
+    // println!(
+    //     "  Bob's pad:   ls {}/padnest_0_000/pad_000/page_000/",
+    //     bob_padset.display()
+    // );
+    // println!(
+    //     "  Cleanup: rm -rf {} {} {} {} {} {}",
+    //     alice_padset.display(),
+    //     bob_padset.display(),
+    //     plaintext.display(),
+    //     encrypted.display(),
+    //     decrypted.display(),
+    //     decrypted2.display()
+    // );
+
+    print_step("3.9", "Test pad exhaustion prevention (should fail)");
+    println!("  Note: Bob's padset already consumed lines 0-1 in step 3.7");
+    println!("  Attempting to decrypt same message again = OTP violation");
+
     let decrypted2 = base_path.join("test3_decrypted2.txt");
     match padnet_reader_xor_file(&encrypted, &decrypted2, &bob_padset, &start_index) {
-        Ok(bytes) => println!(
-            "  ✓ Re-decrypted {} bytes (reader mode preserved pad)",
-            bytes
-        ),
-        Err(e) => println!("  ✗ Re-decrypt failed: {}", e),
+        Ok(_) => {
+            println!("  ✗✗✗ SECURITY FAILURE! Re-used pad material (OTP violation)");
+            println!("  This should NEVER succeed - indicates broken pad consumption");
+        }
+        Err(e) => {
+            println!("  ✓ Correctly rejected re-use attempt");
+            println!("  Error: {}", e);
+
+            // Verify the specific failure mode
+            let error_msg = format!("{}", e);
+            if error_msg.contains("index mismatch") || error_msg.contains("line not found") {
+                println!("  ✓ Correct failure reason: pad material already consumed");
+            } else {
+                println!("  ⚠ Unexpected error type (expected index/line not found)");
+            }
+        }
+    }
+
+    print_step("3.10", "Verify Bob's pad consumption matches Alice's");
+    let alice_first = find_first_available_line(&alice_padset, PadIndexMaxSize::Standard4Byte);
+    let bob_first = find_first_available_line(&bob_padset, PadIndexMaxSize::Standard4Byte);
+
+    match (alice_first, bob_first) {
+        (Ok(Some(alice_idx)), Ok(Some(bob_idx))) => {
+            if alice_idx == bob_idx {
+                println!("  ✓ Both parties consumed identical pad material");
+                println!("    Alice next: {:?}", alice_idx);
+                println!("    Bob next:   {:?}", bob_idx);
+            } else {
+                println!("  ✗ Pad consumption mismatch!");
+                println!("    Alice next: {:?}", alice_idx);
+                println!("    Bob next:   {:?}", bob_idx);
+            }
+        }
+        (Ok(None), Ok(None)) => {
+            println!("  ✓ Both parties exhausted pad (unlikely with 11 lines)");
+        }
+        _ => {
+            println!("  ✗ Error checking pad states");
+        }
+    }
+
+    print_step("3.11", "Verify original decryption still valid");
+    match fs::read(&decrypted) {
+        Ok(content) => {
+            if content == message {
+                println!("  ✓ Original decryption file intact and correct");
+            } else {
+                println!("  ✗ Original decryption corrupted");
+            }
+        }
+        Err(e) => println!("  ✗ Cannot read original decryption: {}", e),
     }
 
     println!(
@@ -309,14 +392,14 @@ fn test_3_alice_bob_cycle(base_path: &Path) {
         "  Bob's pad:   ls {}/padnest_0_000/pad_000/page_000/",
         bob_padset.display()
     );
+    println!("  Expected: Both should be missing line_000 and line_001");
     println!(
-        "  Cleanup: rm -rf {} {} {} {} {} {}",
+        "  Cleanup: rm -rf {} {} {} {} {}",
         alice_padset.display(),
         bob_padset.display(),
         plaintext.display(),
         encrypted.display(),
-        decrypted.display(),
-        decrypted2.display()
+        decrypted.display()
     );
 }
 
@@ -399,7 +482,7 @@ fn test_4_hash_validation(base_path: &Path) {
     let decrypted = base_path.join("test4a_decrypted.txt");
     let idx = PadIndex::new_standard([0, 0, 0, 0]);
     match padnet_reader_xor_file(&encrypted, &decrypted, &bob_page, &idx) {
-        Ok(bytes) => println!("  ✓ Decryption succeeded: {} bytes", bytes),
+        Ok(bytes) => println!("  ✓ Decryption succeeded: {:?} bytes", bytes),
         Err(e) => println!("  ✗ Failed: {}", e),
     }
 
